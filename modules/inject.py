@@ -3,6 +3,7 @@ import os
 import io
 import tempfile
 import shutil
+import re
 
 from pyffi_ext.formats.dds import DdsFormat
 from pyffi_ext.formats.ms2 import Ms2Format
@@ -70,7 +71,7 @@ def inject(ovl_data, file_paths, show_dds):
 			load_lua(ovl_data, file_path, sized_str_entry)
 		elif ext == ".assetpkg":
 			load_assetpkg(ovl_data, file_path, sized_str_entry)
-		  
+
 	shutil.rmtree(tmp_dir)
 
 
@@ -87,14 +88,17 @@ def to_bytes(inst, data):
 		return frag_writer.getvalue()
 
 
+def update_txt(txt_sized_str_entry, raw_txt_bytes):
+	data = struct.pack("<I", len(raw_txt_bytes)) + raw_txt_bytes
+	# make sure all are updated, and pad to 8 bytes
+	txt_sized_str_entry.pointers[0].update_data(data, update_copies=True, pad_to=8)
+
+
 def load_txt(ovl_data, txt_file_path, txt_sized_str_entry):
 
-	archive = ovl_data.archives[0]
 	with open(txt_file_path, 'rb') as stream:
 		raw_txt_bytes = stream.read()
-		data = struct.pack("<I", len(raw_txt_bytes)) + raw_txt_bytes
-		# make sure all are updated, and pad to 8 bytes
-		txt_sized_str_entry.pointers[0].update_data(data, update_copies=True, pad_to=8)
+		update_txt(txt_sized_str_entry, raw_txt_bytes)
 
 
 def load_xmlconfig(ovl_data, xml_file_path, xml_sized_str_entry):
@@ -473,8 +477,8 @@ def load_assetpkg(ovl_data, assetpkg_file_path, sized_str_entry):
 	assetpkg_data = AssetpkgFormat.Data()
 	with open(assetpkg_file_path, "rb") as stream:
 		assetpkg_data.read(stream)
-		sized_str_entry.fragments[0].pointers[1].update_data( to_bytes(assetpkg_data.header.data_1, assetpkg_data), update_copies=True )  
-        
+		sized_str_entry.fragments[0].pointers[1].update_data( to_bytes(assetpkg_data.header.data_1, assetpkg_data), update_copies=True )
+
 def load_lua(ovl_data, lua_file_path, lua_sized_str_entry):
 	# read lua
 	# inject lua buffer
@@ -499,4 +503,35 @@ def load_lua(ovl_data, lua_file_path, lua_sized_str_entry):
 		print(frag1_data1)
 		lua_sized_str_entry.pointers[0].update_data(string_data, update_copies=True)
 		lua_sized_str_entry.fragments[0].pointers[1].update_data(frag0_data1, update_copies=True)
-		lua_sized_str_entry.fragments[1].pointers[1].update_data(frag1_data1, update_copies=True)  
+		lua_sized_str_entry.fragments[1].pointers[1].update_data(frag1_data1, update_copies=True)
+
+
+def unescape_text_for_import(escaped):
+	def unescape(match):
+		sequence = match.group(1)
+		if sequence == "\\":
+			return "\\"
+		elif sequence == "t":
+			return "\t"
+		elif sequence == "r":
+			return "\r"
+		elif sequence == "n":
+			return "\n"
+		else:
+			return chr(int(sequence, 16))
+	return re.sub(r"\\([0-9a-f]{2}|[\\trn])", unescape, escaped)
+
+
+def inject_localization(ovl_data, source_path):
+	entry_lookup = {entry.basename.lower() : entry
+					for archive in ovl_data.archives
+					for entry in archive.sized_str_entries
+					if entry.ext=="txt"}
+	with open(source_path, "rt", encoding="utf-8") as input:
+		for line in input:
+			line = line.rstrip("\r\n")
+			name, value = line.split("=", 1)
+			unescaped_value = unescape_text_for_import(value)
+			entry = entry_lookup[name.lower()]
+			update_txt(entry, unescaped_value.encode("utf-8"))
+

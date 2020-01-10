@@ -28,7 +28,9 @@ class MainWindow(widgets.MainWindow):
 						(fileMenu, "Save", self.save_ovl, "CTRL+S"),
 						(fileMenu, "Exit", self.close, ""),
 						(editMenu, "Unpack", self.extract_all, "CTRL+U"),
+						(editMenu, "Extract text", self.extract_text, ""),
 						(editMenu, "Inject", self.inject, "CTRL+I"),
+						(editMenu, "Inject text", self.inject_text, ""),
 						(editMenu, "Hash", self.hasher,"CTRL+H"),
 						(helpMenu, "Report Bug", self.report_bug, ""),
 						(helpMenu, "Documentation", self.online_support, "") )
@@ -145,7 +147,20 @@ class MainWindow(widgets.MainWindow):
 					print(ex)
 		else:
 			widgets.showdialog( "You must open an OVL file before you can extract files!" )
-			
+
+	def extract_text(self):
+		if self.ovl_name:
+			target_path = QtWidgets.QFileDialog.getSaveFileName(self, 'Save text', filter="Text files (*.txt)")[0]
+			if target_path:
+				try:
+					extract.extract_for_localization(self.ovl_data.archives, target_path)
+				except Exception as ex:
+					traceback.print_exc()
+					widgets.showdialog( str(ex) )
+					print(ex)
+		else:
+			widgets.showdialog( "You must open an OVL file before you can extract text!")
+
 	def inject(self):
 		if self.ovl_name:
 			files = QtWidgets.QFileDialog.getOpenFileNames(self, 'Inject files', self.cfg["dir_inject"], self.filter)[0]
@@ -160,7 +175,19 @@ class MainWindow(widgets.MainWindow):
 		else:
 			widgets.showdialog( "You must open an OVL file before you can inject files!" )
 
-			       
+	def inject_text(self):
+		if self.ovl_name:
+			source_path = QtWidgets.QFileDialog.getOpenFileName(self, "Inject text", filter="Text files (*.txt)")[0]
+			if source_path:
+				try:
+					inject.inject_localization(self.ovl_data, source_path)
+				except Exception as ex:
+					traceback.print_exc()
+					widgets.showdialog(str(ex))
+					print(ex)
+		else:
+			widgets.showdialog( "You must open an OVL file before you can inject text!" )
+
 	def hasher(self):
 		if self.ovl_name:
 			names = [ (tup[0].text(), tup[1].text()) for tup in self.e_name_pairs ]

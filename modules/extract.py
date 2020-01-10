@@ -2,6 +2,7 @@ import struct
 import os
 import io
 import tempfile
+import re
 
 from pyffi_ext.formats.dds import DdsFormat
 # from pyffi_ext.formats.ms2 import Ms2Format
@@ -76,14 +77,17 @@ def extract(archive, show_dds):
 				
 		else:
 			print("\nSkipping",sized_str_entry.name)
-	
 
-def write_txt(archive, txt_sized_str_entry):
+def get_txt_data(archive, txt_sized_str_entry):
 	# a bare sized str
 	b = txt_sized_str_entry.pointers[0].data
 	size = struct.unpack("<I", b[:4])[0]
+	return b[4:4+size]
+
+def write_txt(archive, txt_sized_str_entry):
+	data = get_txt_data(archive, txt_sized_str_entry)
 	with open(archive.indir(txt_sized_str_entry.name), "wb") as f:
-		f.write(b[4:4+size])
+		f.write(data)
 
 
 def get_tex_structs(archive, sized_str_entry):
@@ -570,3 +574,28 @@ def write_userinterfaceicondata(archive, sized_str_entry):
 			outfile.write( frag.pointers[1].data )
 		# write the buffer
 		outfile.write(buffer_data)
+
+
+def escape_text_for_export(text):
+	def escape_special(match):
+		char = match.group(0)
+		if char == "\\":
+			return "\\\\"
+		elif char == "\t":
+			return "\\t"
+		elif char == "\r":
+			return "\\r"
+		elif char == "\n":
+			return "\\n"
+		else:
+			return "\\{0:02x}".format(ord(char))
+	return re.sub("[\0-\x1f\\\\]", escape_special, text)
+
+
+def extract_for_localization(archives, target_path):
+	with open(target_path, "wt", encoding="utf-8") as out:
+		for archive in archives:
+			for sized_str_entry in archive.sized_str_entries:
+				if sized_str_entry.ext == 'txt':
+					txt_data = get_txt_data(archive, sized_str_entry).decode("utf-8")
+					out.write("{0}={1}\n".format(sized_str_entry.basename, escape_text_for_export(txt_data)))
