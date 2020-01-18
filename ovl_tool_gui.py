@@ -4,10 +4,12 @@ import sys
 import traceback
 import time
 from PyQt5 import QtWidgets, QtGui, QtCore
+import numpy as np
 
 from pyffi_ext.formats.ovl import OvlFormat
+from pyffi_ext.formats.ms2 import Ms2Format
 from util import widgets, config
-from modules import extract, inject,hasher
+from modules import extract, inject, hasher, walker
 
 class MainWindow(widgets.MainWindow):
 
@@ -15,38 +17,15 @@ class MainWindow(widgets.MainWindow):
 		widgets.MainWindow.__init__(self, "OVL Tool", )
 		
 		self.ovl_data = OvlFormat.Data()
-		self.file_src = ""
 
 		supported_types = ("DDS", "PNG", "MDL2", "TXT", "FGM", "FDB", "MATCOL", "XMLCONFIG","ASSETPKG","LUA")
 		self.filter = "Supported files ({})".format( " ".join("*."+t for t in supported_types) )
-		
-		mainMenu = self.menuBar() 
-		fileMenu = mainMenu.addMenu('File')
-		editMenu = mainMenu.addMenu('Edit')
-		helpMenu = mainMenu.addMenu('Help')
-		button_data = ( (fileMenu, "Open", self.open_ovl, "CTRL+O"),
-						(fileMenu, "Save", self.save_ovl, "CTRL+S"),
-						(fileMenu, "Exit", self.close, ""),
-						(editMenu, "Unpack", self.extract_all, "CTRL+U"),
-						(editMenu, "Extract text", self.extract_text, ""),
-						(editMenu, "Inject", self.inject, "CTRL+I"),
-						(editMenu, "Inject text", self.inject_text, ""),
-						(editMenu, "Hash", self.hasher,"CTRL+H"),
-						(helpMenu, "Report Bug", self.report_bug, ""),
-						(helpMenu, "Documentation", self.online_support, "") )
-		self.add_to_menu(button_data)
 
-		tooltips = ( "Load an OVL archive whose files you want to modify.",
-					 "Save the OVL file you do not want to merge.",
-					 "Unpack all known files from the OVL into the selected folder.",
-					 "Load files to inject into the opened OVL archive.")
-
-		self.e_ovl_name = QtWidgets.QLineEdit(self)
-		self.e_ovl_name.setToolTip("The name of the OVL file that is currently open.")
-		self.e_ovl_name.setReadOnly(True)
+		self.file_widget = widgets.FileWidget(self, self.cfg)
+		self.file_widget.setToolTip("The name of the OVL file that is currently open.")
 
 		self.e_name_pairs = [ (QtWidgets.QLineEdit("old"), QtWidgets.QLineEdit("new")) for i in range(3) ]
-        
+
 		# toggles
 		self.t_write_dds = QtWidgets.QCheckBox("Save DDS")
 		self.t_write_dds.setToolTip("By default, DDS files are converted to PNG and back on the fly.")
@@ -55,15 +34,15 @@ class MainWindow(widgets.MainWindow):
 		self.t_write_dat = QtWidgets.QCheckBox("Save DAT")
 		self.t_write_dat.setToolTip("Writes decompressed archive streams to DAT files for debugging.")
 		self.t_write_dat.setChecked(False)
-		self.t_write_dat.stateChanged.connect(self.load_ovl)
+		self.t_write_dat.stateChanged.connect(self.file_widget.ask_open)
 
 		self.t_write_frag_log = QtWidgets.QCheckBox("Save Frag Log")
 		self.t_write_frag_log.setToolTip("For devs.")
 		self.t_write_frag_log.setChecked(False)
-		self.t_write_frag_log.stateChanged.connect(self.load_ovl)
+		self.t_write_frag_log.stateChanged.connect(self.file_widget.ask_open)
 
 		self.qgrid = QtWidgets.QGridLayout()
-		self.qgrid.addWidget(self.e_ovl_name, 0, 0, 1, 2)
+		self.qgrid.addWidget(self.file_widget, 0, 0, 1, 2)
 		self.qgrid.addWidget(self.t_write_dds, 1, 0)
 		self.qgrid.addWidget(self.t_write_dat, 2, 0)
 		self.qgrid.addWidget(self.t_write_frag_log, 3, 0)
@@ -73,7 +52,24 @@ class MainWindow(widgets.MainWindow):
 			self.qgrid.addWidget(new, start+i, 1)
 
 		self.central_widget.setLayout(self.qgrid)
-	
+
+		mainMenu = self.menuBar()
+		fileMenu = mainMenu.addMenu('File')
+		editMenu = mainMenu.addMenu('Edit')
+		helpMenu = mainMenu.addMenu('Help')
+		button_data = ((fileMenu, "Open", self.file_widget.ask_open, "CTRL+O"),
+					   (fileMenu, "Save", self.save_ovl, "CTRL+S"),
+					   (fileMenu, "Exit", self.close, ""),
+					   (editMenu, "Unpack", self.extract_all, "CTRL+U"),
+					   (editMenu, "Extract text", self.extract_text, ""),
+					   (editMenu, "Inject", self.inject, "CTRL+I"),
+					   (editMenu, "Inject text", self.inject_text, ""),
+					   (editMenu, "Hash", self.hasher, "CTRL+H"),
+					   (editMenu, "Walk", self.walker, ""),
+					   (helpMenu, "Report Bug", self.report_bug, ""),
+					   (helpMenu, "Documentation", self.online_support, ""))
+		self.add_to_menu(button_data)
+
 	@property
 	def commands(self,):
 		# get those commands that are set to True
@@ -86,7 +82,7 @@ class MainWindow(widgets.MainWindow):
 
 	@property
 	def ovl_name(self,):
-		return self.e_ovl_name.text()
+		return self.file_widget.text()
 
 	@property
 	def write_dds(self,):
@@ -100,19 +96,15 @@ class MainWindow(widgets.MainWindow):
 	def write_frag_log(self,):
 		return self.t_write_frag_log.isChecked()
 
-	def open_ovl(self):
-		"""Just a wrapper so we can also reload via code"""
-		self.file_src = QtWidgets.QFileDialog.getOpenFileName(self, 'Load OVL', self.cfg["dir_ovls_in"], "OVL files (*.ovl)")[0]
-		self.load_ovl()
-
 	def load_ovl(self):
-		if self.file_src:
-			self.cfg["dir_ovls_in"], ovl_name = os.path.split(self.file_src)
+		if self.file_widget.filepath:
+			self.file_widget.dirty = False
+			self.cfg["dir_ovls_in"], ovl_name = os.path.split(self.file_widget.filepath)
 			start_time = time.time()
 			try:
-				with open(self.file_src, "rb") as ovl_stream:
-					self.ovl_data.read(ovl_stream, file=self.file_src, commands=self.commands)
-				self.e_ovl_name.setText(ovl_name)
+				with open(self.file_widget.filepath, "rb") as ovl_stream:
+					self.ovl_data.read(ovl_stream, file=self.file_widget.filepath, commands=self.commands)
+				self.file_widget.setText(ovl_name)
 			except Exception as ex:
 				traceback.print_exc()
 				widgets.showdialog( str(ex) )
@@ -127,6 +119,7 @@ class MainWindow(widgets.MainWindow):
 				# just a dummy stream
 				with io.BytesIO() as ovl_stream:
 					self.ovl_data.write(ovl_stream, file_path=file_src)
+				self.file_widget.dirty = False
 				print("Done!")
 			
 	def extract_all(self):
@@ -168,6 +161,7 @@ class MainWindow(widgets.MainWindow):
 				self.cfg["dir_inject"] = os.path.dirname(files[0])
 			try:
 				inject.inject( self.ovl_data, files, self.write_dds )
+				self.file_widget.dirty = True
 			except Exception as ex:
 				traceback.print_exc()
 				widgets.showdialog( str(ex) )
@@ -193,12 +187,76 @@ class MainWindow(widgets.MainWindow):
 			names = [ (tup[0].text(), tup[1].text()) for tup in self.e_name_pairs ]
 			for archive in self.ovl_data.archives:
 				hasher.dat_hasher(archive, names, self.ovl_data.header.files,self.ovl_data.header.textures)
-
-
 		else:
 			widgets.showdialog( "You must open an OVL file before you can extract files!" )
 
-			       
+	def walker(self, dummy=False, walk_ovls=True, walk_models=True):
+		start_dir = QtWidgets.QFileDialog.getExistingDirectory(self, 'Game Root folder', self.cfg["dir_ovls_in"], )
+		errors = []
+		# holds different types of flag - list of byte maps pairs
+		type_dic = {}
+		if start_dir:
+			export_dir = os.path.join(start_dir, "walker_export")
+			# don't use internal data
+			ovl_data = OvlFormat.Data()
+			mdl2_data = Ms2Format.Data()
+			if walk_ovls:
+				for ovl_path in walker.walk_type(start_dir, extension="ovl"):
+					try:
+						# read ovl file
+						with open(ovl_path, "rb") as ovl_stream:
+							ovl_data.read(ovl_stream, file=ovl_path, commands=self.commands)
+						# create an output folder for it
+						outdir = os.path.join(export_dir, os.path.basename(ovl_path[:-4]))
+						# create output dir
+						os.makedirs(outdir, exist_ok=True)
+						for archive in ovl_data.archives:
+							archive.dir = outdir
+							extract.extract(archive, self.write_dds, only_types=["ms2",])
+					except Exception as ex:
+						traceback.print_exc()
+						errors.append((ovl_path, ex))
+			if walk_models:
+				for mdl2_path in walker.walk_type(export_dir, extension="mdl2"):
+					mdl2_name = os.path.basename(mdl2_path)
+					try:
+						with open(mdl2_path, "rb") as ovl_stream:
+							mdl2_data.read(ovl_stream, file=mdl2_path, quick=True, map_bytes=True)
+							for model in mdl2_data.mdl2_header.models:
+								if model.flag not in type_dic:
+									type_dic[model.flag] = ([], [])
+								type_dic[model.flag][0].append(mdl2_name)
+								type_dic[model.flag][1].append(model.bytes_map)
+					except Exception as ex:
+						traceback.print_exc()
+						errors.append((mdl2_path, ex))
+			# report
+			print("\nThe following errors occured:")
+			for file_path, ex in errors:
+				print(file_path, str(ex))
+
+			print("\nThe following type - map pairs were found:")
+			for flag, tup in type_dic.items():
+				print(flag, bin(flag))
+				names, maps_list = tup
+				print("Some files:", list(set(names))[:25])
+				print("num models", len(maps_list))
+				print("mean", np.mean(maps_list, axis=0).astype(dtype=np.ubyte))
+				print("max", np.max(maps_list, axis=0))
+				print()
+
+	def closeEvent(self, event):
+		if self.file_widget.dirty:
+			qm = QtWidgets.QMessageBox
+			quit_msg = "You will lose unsaved work on "+os.path.basename(self.file_widget.filepath)+"!"
+			reply = qm.question(self, 'Quit?', quit_msg, qm.Yes, qm.No)
+
+			if reply == qm.Yes:
+				event.accept()
+			else:
+				event.ignore()
+		else:
+			event.accept()
 
 if __name__ == '__main__':
 	widgets.startup( MainWindow )
